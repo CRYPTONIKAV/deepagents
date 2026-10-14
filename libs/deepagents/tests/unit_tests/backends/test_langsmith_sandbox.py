@@ -7,7 +7,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from langsmith.sandbox import ResourceNotFoundError, SandboxClientError
+from langsmith.sandbox import (
+    ResourceNotFoundError,
+    SandboxClientError,
+    SandboxConnectionError,
+    SandboxOperationError,
+)
 
 from deepagents.backends import sandbox as base_sandbox
 from deepagents.backends.langsmith import LangSmithSandbox
@@ -168,7 +173,7 @@ def test_upload_files_success() -> None:
 
 def test_upload_files_error() -> None:
     sb, mock_sdk = _make_sandbox()
-    mock_sdk.write.side_effect = SandboxClientError("permission denied")
+    mock_sdk.write.side_effect = SandboxOperationError("forbidden", error_type="PermissionDenied")
 
     responses = sb.upload_files([("/readonly/test.txt", b"content")])
 
@@ -177,9 +182,34 @@ def test_upload_files_error() -> None:
     assert responses[0].error == "permission_denied"
 
 
+def test_upload_files_connection_error_passes_through() -> None:
+    """A connection failure must not masquerade as a permission error (#6911)."""
+    sb, mock_sdk = _make_sandbox()
+    mock_sdk.write.side_effect = SandboxConnectionError("connection refused")
+
+    responses = sb.upload_files([("/app/example.txt", b"hello")])
+
+    assert responses[0].error == "SandboxConnectionError: connection refused"
+
+
+def test_download_files_connection_error_passes_through() -> None:
+    """A connection failure must not masquerade as a missing file (#6911)."""
+    sb, mock_sdk = _make_sandbox()
+    mock_sdk.read.side_effect = SandboxConnectionError("connection refused")
+
+    responses = sb.download_files(["/app/example.txt"])
+
+    assert responses[0].content is None
+    assert responses[0].error == "SandboxConnectionError: connection refused"
+
+
 def test_upload_files_partial_success() -> None:
     sb, mock_sdk = _make_sandbox()
-    mock_sdk.write.side_effect = [None, SandboxClientError("fail"), None]
+    mock_sdk.write.side_effect = [
+        None,
+        SandboxOperationError("forbidden", error_type="PermissionDenied"),
+        None,
+    ]
 
     responses = sb.upload_files(
         [

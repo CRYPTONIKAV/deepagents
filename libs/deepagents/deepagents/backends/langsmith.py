@@ -36,6 +36,25 @@ def _execute_response(result: ExecutionResult) -> ExecuteResponse:
     return ExecuteResponse(output=output, exit_code=result.exit_code, truncated=False)
 
 
+def _transfer_error(exc: Exception) -> str:
+    """Classify an SDK transfer failure without masking it (#6911).
+
+    Known filesystem conditions keep their `FileOperationError` literal;
+    anything else (auth, connection, not-ready, unexpected API errors)
+    passes through as `TypeName: message` so callers see a diagnosis
+    instead of a misleading standard code.
+    """
+    from langsmith.sandbox import ResourceNotFoundError, SandboxOperationError  # noqa: PLC0415
+
+    if isinstance(exc, ResourceNotFoundError):
+        return "file_not_found"
+    if isinstance(exc, SandboxOperationError) and exc.error_type == "PermissionDenied":
+        return "permission_denied"
+    if "is a directory" in str(exc).lower():
+        return "is_directory"
+    return f"{type(exc).__name__}: {exc}"
+
+
 def _binary_read_result(file_path: str, raw: bytes) -> ReadResult:
     """Build the binary `ReadResult` shape used by `LangSmithSandbox.read()`.
 
@@ -318,9 +337,7 @@ class LangSmithSandbox(BaseSandbox):
             except ResourceNotFoundError:
                 responses.append(FileDownloadResponse(path=path, content=None, error="file_not_found"))
             except SandboxClientError as e:
-                msg = str(e).lower()
-                error = "is_directory" if "is a directory" in msg else "file_not_found"
-                responses.append(FileDownloadResponse(path=path, content=None, error=error))
+                responses.append(FileDownloadResponse(path=path, content=None, error=_transfer_error(e)))
         return responses
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
@@ -349,5 +366,5 @@ class LangSmithSandbox(BaseSandbox):
                 responses.append(FileUploadResponse(path=path, error=None))
             except SandboxClientError as e:
                 logger.debug("Failed to upload %s: %s", path, e)
-                responses.append(FileUploadResponse(path=path, error="permission_denied"))
+                responses.append(FileUploadResponse(path=path, error=_transfer_error(e)))
         return responses
